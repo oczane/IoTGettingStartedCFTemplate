@@ -1,0 +1,821 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "CloudFormation template that creates most of the resources needed for your AWS IoT project - this includes an API Gateway RESTful API, a pair of DynamoDB tables, a Lambda function, IAM policies & roles, an EC2 instance to simular your Things, and other ",
+
+  "Parameters" : {
+    "KeyName": {
+      "Description": "Name of an existing EC2 KeyPair to enable SSH access to the device simulator EC2 instance",
+      "Type": "AWS::EC2::KeyPair::KeyName",
+      "ConstraintDescription": "must be the name of an existing EC2 KeyPair."
+    }
+  },
+
+  "Mappings": {
+
+     "AWSRegion2AMI": {
+      "us-east-1": {
+        "HVM64": "ami-c481fad3"
+      },
+      "us-west-2": {
+        "HVM64": "ami-b04e92d0"
+      },
+      "eu-west-1": {
+        "HVM64": "ami-d41d58a7"
+      },
+      "eu-central-1": {
+        "HVM64": "ami-0044b96f"
+      },
+      "ap-northeast-1": {
+        "HVM64": "ami-1a15c77b"
+      },
+      "ap-northeast-2": {
+        "HVM64": "ami-a04297ce"
+      },
+      "ap-southeast-1": {
+        "HVM64": "ami-7243e611"
+      },
+      "ap-southeast-2": {
+        "HVM64": "ami-55d4e436"
+      }
+    }
+  },
+
+  "Resources" : {
+    "ApiGatewayLambdaInvokePermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName" : { "Fn::GetAtt" : ["IoTGSLambdaFunctionReadFromDynamo", "Arn"] },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "apigateway.amazonaws.com",
+        "SourceAccount": { "Ref" : "AWS::AccountId" }
+      }
+    },
+
+    "IoTGSS3Bucket" : {
+      "Type" : "AWS::S3::Bucket",
+      "Properties" : {
+        "AccessControl": "PublicRead"
+      }
+    },
+
+    "IoTGSVpc" : {
+          "Type" : "AWS::EC2::VPC",
+          "Properties" : {
+            "CidrBlock" : "10.0.0.0/16"
+          }
+    },
+
+    "Subnet" : {
+          "Type" : "AWS::EC2::Subnet",
+          "Properties" : {
+            "VpcId" : { "Ref" : "IoTGSVpc" },
+            "CidrBlock" : "10.0.0.0/24"
+          }
+    },
+
+    "InternetGateway" : {
+          "Type" : "AWS::EC2::InternetGateway"
+    },
+
+    "AttachInternetGateway" : {
+           "Type" : "AWS::EC2::VPCGatewayAttachment",
+           "Properties" : {
+             "VpcId" : { "Ref" : "IoTGSVpc" },
+             "InternetGatewayId" : { "Ref" : "InternetGateway" }
+           }
+    },
+
+    "RouteTable" : {
+          "Type" : "AWS::EC2::RouteTable",
+          "Properties" : {
+            "VpcId" : {"Ref" : "IoTGSVpc"}
+          }
+    },
+
+    "Route" : {
+          "Type" : "AWS::EC2::Route",
+          "DependsOn" : "AttachInternetGateway",
+          "Properties" : {
+            "RouteTableId" : { "Ref" : "RouteTable" },
+            "DestinationCidrBlock" : "0.0.0.0/0",
+            "GatewayId" : { "Ref" : "InternetGateway" }
+          }
+    },
+
+    "SubnetRouteTableAssociation" : {
+          "Type" : "AWS::EC2::SubnetRouteTableAssociation",
+          "Properties" : {
+            "SubnetId" : { "Ref" : "Subnet" },
+            "RouteTableId" : { "Ref" : "RouteTable" }
+          }
+    },
+
+    "Ec2InstanceProfileRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": {
+              "Service": [
+                "ec2.amazonaws.com"
+              ]
+            },
+            "Action": [
+              "sts:AssumeRole"
+            ]
+          }]
+        },
+        "Policies" : [ {
+           "PolicyName" : "giveEc2InstanceAccessToS3",
+           "PolicyDocument" : {
+              "Version": "2012-10-17",
+              "Statement": {
+                "Sid": "",
+                "Effect": "Allow",
+                "Action": [
+                  "s3:*"
+                ],
+                "Resource": [
+                  {"Fn::Join" : [ "", [ "arn:aws:s3:::", { "Ref" : "IoTGSS3Bucket" } ] ]},
+                  {"Fn::Join" : [ "", [ "arn:aws:s3:::", { "Ref" : "IoTGSS3Bucket" }, "/*" ] ]}
+                ]
+              }
+            }
+        },
+        {
+           "PolicyName" : "giveEc2InstanceAccessToIot",
+           "PolicyDocument" : {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                "Sid": "Stmt1473228019000",
+                "Effect": "Allow",
+                "Action": [
+                    "iot:*"
+                ],
+                "Resource": [
+                    "*"
+                ]
+                }
+            ]
+            }
+        } ],
+        "Path": "/"
+      }
+    },
+
+    "Ec2InstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [{
+          "Ref": "Ec2InstanceProfileRole"
+        }]
+      }
+    },
+
+    "Ec2InstanceSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Enable SSH access via port 22",
+        "SecurityGroupIngress": [{
+          "IpProtocol": "tcp",
+          "FromPort": "22",
+          "ToPort": "22",
+          "CidrIp": "0.0.0.0/0"
+        }],
+        "VpcId" : { "Ref" : "IoTGSVpc" }
+      }
+    },
+
+    "Ec2InstanceDeviceSimulator": {
+      "Type": "AWS::EC2::Instance",
+      "DependsOn" : "AttachInternetGateway",
+      "Metadata": {
+        "AWS::CloudFormation::Init": {
+          "configSets": {
+            "InstallAndRun": ["Install"]
+          },
+          "Install": {
+            "packages": {
+              "yum": {
+                "git":[]
+              }
+            },
+            "files": {
+
+              "/etc/cfn/cfn-hup.conf": {
+                "content": {
+                  "Fn::Join": [
+                    "", [
+                      "[main]\n",
+                      "stack=", {
+                        "Ref": "AWS::StackId"
+                      },
+                      "\n",
+                      "region=", {
+                        "Ref": "AWS::Region"
+                      },
+                      "\n"
+                    ]
+                  ]
+                },
+                "mode": "000400",
+                "owner": "root",
+                "group": "root"
+              },
+              "/etc/cfn/hooks.d/cfn-auto-reloader.conf": {
+                "content": {
+                  "Fn::Join": [
+                    "", [
+                      "[cfn-auto-reloader-hook]\n",
+                      "triggers=post.update\n",
+                      "path=Resources.Ec2InstanceDeviceSimulator.Metadata.AWS::CloudFormation::Init\n",
+                      "action=/opt/aws/bin/cfn-init -v ",
+                      "         --stack ", {
+                        "Ref": "AWS::StackName"
+                      },
+                      "         --resource Ec2InstanceDeviceSimulator ",
+                      "         --configsets InstallAndRun ",
+                      "         --region ", {
+                        "Ref": "AWS::Region"
+                      },
+                      "\n",
+                      "runas=root\n"
+                    ]
+                  ]
+                }
+              }
+            },
+            "commands": {
+
+              "00_DownloadAndUnpackDeviceSimScript": {
+                "command": { "Fn::Join": [
+                  "", ["wget https://d1.awsstatic.com/Projects/P4113926/device-simulator-script.zip; unzip device-simulator-script.zip; sudo chown -R ec2-user /home/ec2-user; sudo aws iot create-keys-and-certificate --set-as-active --certificate-pem-outfile ./certs/certificate.pem.crt --private-key-outfile ./certs/private.pem.key --region ", {
+                    "Ref": "AWS::Region"
+                  },"; rm device-simulator-script.zip; sudo chown -R ec2-user /home/ec2-user"] ]},
+                "cwd": "/home/ec2-user/",
+                "ignoreErrors": "true"
+              },
+              "01_PipInstallRequirements": {
+                "command": "sudo pip install -r requirements.txt",
+                "cwd": "/home/ec2-user/",
+                "ignoreErrors": "true"
+              },
+              "02_DownloadAndUnpackDashboard": {
+                "command": "wget https://d1.awsstatic.com/Projects/P4113926/realtime-dashboard.zip; unzip realtime-dashboard.zip; rm realtime-dashboard.zip; sudo chown -R ec2-user /home/ec2-user/dashboard",
+                "cwd": "/home/ec2-user/",
+                "ignoreErrors": "true"
+              }
+        },
+            "services": {
+              "sysvinit": {
+                "cfn-hup": {
+                  "enabled": "true",
+                  "ensureRunning": "true",
+                  "files": [
+                    "/etc/cfn/cfn-hup.conf",
+                    "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "Properties": {
+        "ImageId": {
+          "Fn::FindInMap": [
+            "AWSRegion2AMI", {
+              "Ref": "AWS::Region"
+            },
+            "HVM64"
+          ]
+        },
+        "NetworkInterfaces": [ {
+          "DeviceIndex": "0",
+          "GroupSet": [{ "Ref" : "Ec2InstanceSecurityGroup" }],
+          "AssociatePublicIpAddress" : "true",
+          "SubnetId": { "Ref" : "Subnet" }
+        } ],
+        "InstanceType": "t2.micro",
+        "KeyName": {
+          "Ref": "KeyName"
+        },
+        "IamInstanceProfile": {
+          "Ref": "Ec2InstanceProfile"
+        },
+        "Tags" : [ {
+           "Key" : "Name",
+           "Value" : "Ec2InstanceDeviceSimulator"
+           } ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "", [
+                "#!/bin/bash -xe\n",
+                "date > /home/ec2-user/starttime\n",
+                "yum update -y aws-cfn-bootstrap\n",
+                "# Install the files and packages from the metadata\n",
+                "/opt/aws/bin/cfn-init -v ",
+                "         --stack ", {
+                  "Ref": "AWS::StackName"
+                },
+                "         --resource Ec2InstanceDeviceSimulator ",
+                "         --configsets InstallAndRun ",
+                "         --region ", {
+                  "Ref": "AWS::Region"
+                },
+                "\n",
+                "date > /home/ec2-user/intertime",
+                "# Signal the status from cfn-init\n",
+                "/opt/aws/bin/cfn-signal -e $? ",
+                "         --stack ", {
+                  "Ref": "AWS::StackName"
+                },
+                "         --resource Ec2InstanceDeviceSimulator ",
+                "         --region ", {
+                  "Ref": "AWS::Region"
+                },
+                "\n",
+                "date > /home/ec2-user/stoptime"
+              ]
+            ]
+          }
+        }
+      }
+    },
+
+    "IoTGSRestApiDeployment": {
+      "Type": "AWS::ApiGateway::Deployment",
+      "Properties": {
+        "RestApiId": { "Ref": "IoTGSRestApi" },
+        "Description": "IoTGS deployment for REST API",
+        "StageName": "DummyStage"
+      }
+    },
+
+    "IoTGSRestApiStage": {
+      "Type": "AWS::ApiGateway::Stage",
+      "Properties": {
+        "StageName": "prod",
+        "Description": "Prod Stage",
+        "RestApiId": { "Ref": "IoTGSRestApi" },
+        "DeploymentId": { "Ref": "IoTGSRestApiDeployment" }
+      }},
+
+    "IoTGSRestApi" : {
+      "Type" : "AWS::ApiGateway::RestApi",
+      "Properties" : {
+
+        "Description" : "Creates an API Gateway Restful API that pulls data from the DynamoDB table and returns it as JSON",
+        "Name" : { "Fn::Join" :  [ "",
+          [ { "Ref" : "AWS::StackName" }, "-IoTGSRestApi" ]
+          ]
+        },
+        "Body" : {
+  "swagger": "2.0",
+  "info": {
+    "version": "2016-08-18T07:31:15Z",
+    "title": "IoTGSTimeSeriesAndDeviceStatus"
+  },
+  "basePath": "/prod",
+  "schemes": [
+    "https"
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "$ref": "#/definitions/Empty"
+            },
+            "headers": {
+              "Access-Control-Allow-Origin": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "x-amazon-apigateway-integration": {
+          "uri": { "Fn::Join" :  [ "",
+                    [ "arn:aws:apigateway:", { "Ref" : "AWS::Region" }, ":lambda:path/2015-03-31/functions/",{ "Fn::GetAtt" : [ "IoTGSLambdaFunctionReadFromDynamo", "Arn" ] }, "/invocations" ]
+                  ]
+                },
+          "passthroughBehavior": "when_no_match",
+          "responses": {
+            "default": {
+              "statusCode": "200",
+              "responseParameters": {
+                "method.response.header.Access-Control-Allow-Origin": "'*'"
+              }
+            }
+          },
+          "httpMethod": "POST",
+          "type": "aws"
+        }
+      },
+      "options": {
+        "consumes": [
+          "application/json"
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "$ref": "#/definitions/Empty"
+            },
+            "headers": {
+              "Access-Control-Allow-Origin": {
+                "type": "string"
+              },
+              "Access-Control-Allow-Methods": {
+                "type": "string"
+              },
+              "Access-Control-Allow-Headers": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "x-amazon-apigateway-integration": {
+          "requestTemplates": {
+            "application/json": "{\"statusCode\": 200}"
+          },
+          "passthroughBehavior": "when_no_match",
+          "responses": {
+            "default": {
+              "statusCode": "200",
+              "responseParameters": {
+                "method.response.header.Access-Control-Allow-Methods": "'GET,OPTIONS'",
+                "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
+                "method.response.header.Access-Control-Allow-Origin": "'*'"
+              }
+            }
+          },
+          "type": "mock"
+        }
+      }
+    },
+    "/{deviceId}": {
+      "get": {
+        "consumes": [
+          "application/json"
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "parameters": [
+          {
+            "name": "deviceId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "$ref": "#/definitions/Empty"
+            },
+            "headers": {
+              "Access-Control-Allow-Origin": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "x-amazon-apigateway-integration": {
+          "requestTemplates": {
+            "application/json": "{ \"deviceId\": \"$input.params('deviceId')\",\n\"httpMethod\":\"$context.httpMethod\"}"
+          },
+          "uri": { "Fn::Join" :  [ "",
+                    [ "arn:aws:apigateway:", { "Ref" : "AWS::Region" }, ":lambda:path/2015-03-31/functions/",{ "Fn::GetAtt" : [ "IoTGSLambdaFunctionReadFromDynamo", "Arn" ] }, "/invocations" ]
+                  ]
+                },
+          "passthroughBehavior": "when_no_templates",
+          "responses": {
+            "default": {
+              "statusCode": "200",
+              "responseParameters": {
+                "method.response.header.Access-Control-Allow-Origin": "'*'"
+              }
+            }
+          },
+          "httpMethod": "POST",
+          "type": "aws"
+        }
+      },
+      "options": {
+        "consumes": [
+          "application/json"
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "$ref": "#/definitions/Empty"
+            },
+            "headers": {
+              "Access-Control-Allow-Origin": {
+                "type": "string"
+              },
+              "Access-Control-Allow-Methods": {
+                "type": "string"
+              },
+              "Access-Control-Allow-Headers": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "x-amazon-apigateway-integration": {
+          "requestTemplates": {
+            "application/json": "{\"statusCode\": 200}"
+          },
+          "passthroughBehavior": "when_no_match",
+          "responses": {
+            "default": {
+              "statusCode": "200",
+              "responseParameters": {
+                "method.response.header.Access-Control-Allow-Methods": "'GET,OPTIONS'",
+                "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
+                "method.response.header.Access-Control-Allow-Origin": "'*'"
+              }
+            }
+          },
+          "type": "mock"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "Empty": {
+      "type": "object"
+    }
+  }
+}
+
+
+      }
+    },
+
+    "IoTGSLambdaFunctionReadFromDynamo" : {
+
+      "Type" : "AWS::Lambda::Function",
+        "Properties" : {
+          "Code" : {
+            "ZipFile":  { "Fn::Join": ["", [
+              "'use strict';\n",
+              "console.log('Loading function');\n",
+              "let response = require('cfn-response');\n",
+              "let doc = require('dynamodb-doc');\n",
+              "let dynamo = new doc.DynamoDB();\n",
+              "exports.handler = (event, context, callback) => {\n",
+              "   console.log('Received event:', JSON.stringify(event, null, 2));\n",
+              "   // is a deviceId passed? if yes, query on data in time series table for that device. if not, scan the device status table\n",
+              "   if (event.deviceId) {\n",
+              "   // need to get data from last 5 minutes, so set up var to store target timestamp\n",
+              "   let timestampRange = (new Date()).getTime() - (300 * 1000);\n",
+              "   let params = {\n",
+              "       TableName: '", { "Ref" : "IoTGSDynamoTimeSeriesTable" }, "',\n",
+              "       KeyConditionExpression: 'deviceId = :hkey and payloadTimestamp > :rkey',\n",
+              "       ExpressionAttributeValues: {\n",
+              "           ':hkey': event.deviceId,\n",
+              "           ':rkey': timestampRange\n",
+              "       }\n",
+              "   };\n",
+              "   dynamo.query(params, function(err, data) {\n",
+              "       if (err) {console.log(err, err.stack);\n",
+              "           callback(null, {});\n",
+              "       }\n",
+              "       else  {   console.log(data);\n",
+              "           callback(null, data);\n",
+              "       }\n",
+              "   });\n",
+              "}\n",
+              "else {\n",
+                    "let params = {\n",
+                    "TableName: '", { "Ref" : "IoTGSDynamoDeviceStatusTable" }, "',\n",
+                  "};\n",
+                    "dynamo.scan(params, function(err, data) {\n",
+                  "if (err) {console.log(err, err.stack); // an error occurred\n",
+                            "callback(null, {});\n",
+                  "}\n",
+                  "else  {   console.log(data);           // successful response\n",
+                            "callback(null, data);\n",
+                  "}\n",
+                "});\n",
+              "}\n",
+              "};\n"
+            ]]}
+          },
+          "Description" : "Function that reads data from a DynamoDB table and returns it to API Gateway",
+          "Handler" : "index.handler",
+          "MemorySize" : 128,
+          "Role" : { "Fn::GetAtt" : ["LambdaFromDynamoRole", "Arn"] },
+          "Runtime" : "nodejs6.10",
+          "Timeout" : 5
+        }
+
+    },
+
+    "ApiGatewayToLambdaInvokePermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName" : { "Fn::GetAtt" : ["IoTGSLambdaFunctionReadFromDynamo", "Arn"] },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "apigateway.amazonaws.com"
+      }
+    },
+
+    "IoTGSDynamoTimeSeriesTable" : {
+      "Type" : "AWS::DynamoDB::Table",
+        "Properties" : {
+          "AttributeDefinitions": [ {
+          "AttributeName" : "deviceId",
+          "AttributeType" : "S"
+        },
+        {
+          "AttributeName" : "payloadTimestamp",
+          "AttributeType" : "N"
+        }],
+        "KeySchema": [
+          { "AttributeName": "deviceId", "KeyType": "HASH" },
+          { "AttributeName": "payloadTimestamp", "KeyType": "RANGE" }
+        ],
+        "ProvisionedThroughput" : {
+          "ReadCapacityUnits" : 5,
+          "WriteCapacityUnits" : 5
+        }
+        }
+    },
+
+    "IoTGSDynamoDeviceStatusTable" : {
+      "Type" : "AWS::DynamoDB::Table",
+        "Properties" : {
+          "AttributeDefinitions": [ {
+          "AttributeName" : "deviceId",
+          "AttributeType" : "S"
+        }],
+        "KeySchema": [
+          { "AttributeName": "deviceId", "KeyType": "HASH" }
+        ],
+        "ProvisionedThroughput" : {
+          "ReadCapacityUnits" : 5,
+          "WriteCapacityUnits" : 5
+        }
+        }
+    },
+
+    "AwsIotToDynamoRole" : {
+      "Type" : "AWS::IAM::Role",
+      "Properties": {
+            "AssumeRolePolicyDocument": {
+               "Version" : "2012-10-17",
+               "Statement": [ {
+                  "Effect": "Allow",
+                  "Principal": {
+                     "Service": [ "iot.amazonaws.com" ]
+                  },
+                  "Action": [ "sts:AssumeRole" ]
+               } ]
+            },
+            "Path": "/",
+            "Policies" : [ {
+               "PolicyName" : "giveIotWriteAccessToDynamoTables",
+               "PolicyDocument" : {
+                  "Version": "2012-10-17",
+                  "Statement": {
+                    "Effect": "Allow",
+                    "Action": [
+                      "dynamodb:BatchWriteItem",
+                      "dynamodb:ListTables",
+                      "dynamodb:PutItem",
+                      "dynamodb:UpdateItem"],
+                    "Resource":
+                      [{ "Fn::Join" :  [ "",
+                        [ "arn:aws:dynamodb:", { "Ref" : "AWS::Region" }, ":",{ "Ref" : "AWS::AccountId" },":table/", { "Ref" : "IoTGSDynamoTimeSeriesTable" } ]
+                      ]
+                    },
+                    { "Fn::Join" :  [ "",
+                      [ "arn:aws:dynamodb:", { "Ref" : "AWS::Region" }, ":",{ "Ref" : "AWS::AccountId" },":table/", { "Ref" : "IoTGSDynamoDeviceStatusTable" } ]
+                    ]
+                  }
+                  ]
+                  }
+                }
+            } ]
+         }
+    },
+
+    "LambdaFromDynamoRole" : {
+      "Type" : "AWS::IAM::Role",
+      "Properties": {
+            "AssumeRolePolicyDocument": {
+               "Version" : "2012-10-17",
+               "Statement": [ {
+                  "Effect": "Allow",
+                  "Principal": {
+                     "Service": [ "lambda.amazonaws.com" ]
+                  },
+                  "Action": [ "sts:AssumeRole" ]
+               } ]
+            },
+            "Path": "/",
+            "Policies" : [ {
+               "PolicyName" : "giveLambdaReadAccessToDynamoTable",
+               "PolicyDocument" : {
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                    "Effect": "Allow",
+                    "Action": [
+                      "dynamodb:BatchGetItem",
+                      "dynamodb:GetItem",
+                      "dynamodb:ListTables",
+                      "dynamodb:Query",
+                      "dynamodb:Scan"],
+                    "Resource":
+                      [{ "Fn::Join" :  [ "",
+                        [ "arn:aws:dynamodb:", { "Ref" : "AWS::Region" }, ":",{ "Ref" : "AWS::AccountId" },":table/", { "Ref" : "IoTGSDynamoTimeSeriesTable" } ]
+                      ]
+                    },
+                    { "Fn::Join" :  [ "",
+                      [ "arn:aws:dynamodb:", { "Ref" : "AWS::Region" }, ":",{ "Ref" : "AWS::AccountId" },":table/", { "Ref" : "IoTGSDynamoDeviceStatusTable" } ]
+                    ]
+                  }]
+                  },
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                      "logs:CreateLogGroup",
+                      "logs:CreateLogStream",
+                      "logs:PutLogEvents"
+                    ],
+                    "Resource": "arn:aws:logs:*:*:*"
+                  }
+                ]
+                }
+            } ]
+         }
+    },
+    "AwsIotRepublishRole" : {
+      "Type" : "AWS::IAM::Role",
+      "Properties": {
+            "AssumeRolePolicyDocument": {
+               "Version" : "2012-10-17",
+               "Statement": [ {
+                  "Effect": "Allow",
+                  "Principal": {
+                     "Service": [ "iot.amazonaws.com" ]
+                  },
+                  "Action": [ "sts:AssumeRole" ]
+               } ]
+            },
+            "Path": "/",
+            "Policies" : [ {
+               "PolicyName" : "giveAwsIotRightsToRepublish",
+               "PolicyDocument" : {
+                  "Version": "2012-10-17",
+                  "Statement": {
+                    "Effect": "Allow",
+                    "Action": [
+                      "iot:Publish"],
+                    "Resource":
+                      { "Fn::Join" :  [ "",
+                        [ "arn:aws:iot:", { "Ref" : "AWS::Region" }, ":",{ "Ref" : "AWS::AccountId" },":topic/device/*/rechargeAlert" ]
+                      ]
+                    }
+                  }
+                }
+            } ]
+         }
+    }
+  },
+
+  "Outputs" : {
+
+    "IpAddressEc2DeviceSimulator" : {
+      "Description" : "Public IP of the EC2 Device Simulator",
+      "Value" : { "Fn::GetAtt" : ["Ec2InstanceDeviceSimulator", "PublicIp"] }
+    },
+    "S3BucketName" : {
+      "Description" : "Name of the S3 bucket for IoT Lab",
+      "Value" : { "Ref" : "IoTGSS3Bucket" }
+    }
+  }
+}
